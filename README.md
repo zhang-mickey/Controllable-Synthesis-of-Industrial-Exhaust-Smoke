@@ -1,2 +1,17 @@
-# literature-study
-A Review of Weakly Supervised Semantic Segmentation via Consistency Regularization from Image-Level Supervision
+
+# Text-to-Speech(TTS)
+# 1. Speaker embedding
+
+
+
+
+# Setup
+
+## Install Requirements
+
+
+```
+pip install -U coqui-tts 
+pip install resembltzer
+pip install pypinyin
+```
