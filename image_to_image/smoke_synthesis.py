@@ -7,6 +7,7 @@ import PIL
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib import cm
 
 from omegaconf import OmegaConf
 from PIL import Image, ImageDraw, ImageFont
@@ -16,6 +17,7 @@ from einops import rearrange, repeat
 from torchvision.utils import make_grid
 from torch import autocast
 from contextlib import nullcontext
+from datetime import datetime
 
 import time
 import copy
@@ -49,7 +51,7 @@ def add_gaussian_noise(tensor, mean, std):
 
 def load_model_from_config(config, ckpt, verbose=False):
     print(f"Loading model from {ckpt}")
-    pl_sd = torch.load(ckpt, map_location="cpu")
+    pl_sd = torch.load(ckpt, map_location="cpu", weights_only=False)
     if "global_step" in pl_sd:
         print(f"Global Step: {pl_sd['global_step']}")
     sd = pl_sd["state_dict"]
@@ -68,7 +70,63 @@ def load_model_from_config(config, ckpt, verbose=False):
     return model
 
 
-# =======================================================
+# def get_smoke_color_scheme(mode="random"):
+#     if mode == "gray":
+#         val = np.random.uniform(0.7, 0.9)
+#         return val, val, val
+#     elif mode == "black":
+#         val = np.random.uniform(0.0, 0.2)
+#         return val, val, val
+def get_smoke_color_from_image(image_np, mask_np, strategy="mean"):
+    """
+    Args:
+        image_np: np.ndarray, shape (H, W, 3), RGB
+        mask_np: np.ndarray, shape (H, W), grayscale mask [0,255]
+    Returns:
+        (r, g, b): sampled color tuple
+    """
+    binary_mask = (mask_np > 128)
+    if not binary_mask.any():
+        return (200, 200, 200)  # fallback to light gray if mask is empty
+
+    pixels = image_np[binary_mask]  # shape: (N, 3)
+
+    if strategy == "mean":
+        rgb = pixels.mean(axis=0)
+    elif strategy == "median":
+        rgb = np.median(pixels, axis=0)
+    elif strategy == "random":
+        rgb = pixels[np.random.randint(0, len(pixels))]
+    else:
+        raise ValueError("Unknown strategy")
+
+    return tuple(rgb.astype(np.uint8))
+
+
+def apply_sampled_color(mask_np, color_rgb):
+    """
+    Args:
+        mask_np: (H, W) grayscale mask
+        color_rgb: (R, G, B) tuple
+    Returns:
+        colored mask (H, W, 3)
+    """
+    h, w = mask_np.shape
+    colored_mask = np.ones((h, w, 3), dtype=np.uint8) * np.array(color_rgb, dtype=np.uint8)
+    return colored_mask
+
+
+def apply_colormap_to_mask(mask, colormap_name='bone'):
+    colormap = cm.get_cmap(colormap_name)
+    mask_norm = mask / 255.0  # normalize to [0, 1]
+    colored_mask = (colormap(mask_norm)[..., :3] * 255).astype(np.uint8)
+    return colored_mask
+
+
+def blend_image_and_mask(image, colored_mask, mask_alpha):
+    return (image * (1 - mask_alpha[..., None]) + colored_mask * mask_alpha[..., None]).astype(np.uint8)
+
+
 def load_img(image, path, mask, noise_std):
     # z = len(image.mode)
     w, h = mask.size
@@ -88,58 +146,24 @@ def load_img(image, path, mask, noise_std):
     image = image.resize((w, h), resample=PIL.Image.LANCZOS)
     mask = mask.resize((w, h), resample=PIL.Image.LANCZOS)
 
-    image = np.array(image)
-    mask = np.array(mask)  # .astype(np.float32) / 255.0
+    image_np = np.array(image).astype(np.float32)
+    mask_np = np.array(mask).astype(np.float32)
 
-    mask = cv2.cvtColor(mask, cv2.COLOR_GRAY2RGB)
-    # mask_out = copy.deepcopy(cv2.cvtColor(mask, cv2.COLOR_RGB2BGR))
+    mask = cv2.cvtColor(mask_np, cv2.COLOR_GRAY2RGB)
 
-    # Map color
-    R = np.random.uniform(0.7, 0.9)
-    G = np.random.uniform(0.2, 0.4)
-    B = np.random.uniform(0, 0.1)
+    sampled_color = get_smoke_color_from_image(image_np, mask_np, strategy="mean")
+    colored_mask = apply_sampled_color(mask_np, sampled_color)
 
-    mask[:, :, 0] = mask[:, :, 0] * R
-    mask[:, :, 1] = mask[:, :, 1] * G
-    mask[:, :, 2] = mask[:, :, 2] * B
+    alpha = mask_np / 255.0
 
-    mask = mask / 255.0 + np.random.normal(0, noise_std, size=(w, h, 3))
-    mask = img_uint8(mask)
+    noisy_mask = colored_mask + np.random.normal(0, noise_std, colored_mask.shape)
+    noisy_mask = np.clip(noisy_mask, 0, 255).astype(np.uint8)
+    blended = blend_image_and_mask(image_np, noisy_mask, alpha)
 
-    image = image / 255.0 + mask / 255.0
-    image = image * 255
-    image[image > 255] = 255
-    # image = img_uint8(image)
+    mask_out = copy.deepcopy(cv2.cvtColor(noisy_mask, cv2.COLOR_RGB2BGR))
 
-    mask_out = copy.deepcopy(cv2.cvtColor(mask, cv2.COLOR_RGB2BGR))
-
-    # To tensor
-    image = np.array(image).astype(np.float32) / 255.0
-    image = image[None].transpose(0, 3, 1, 2)
-    image = torch.from_numpy(image)
-
-    return (2. * image - 1.), mask_out, [R, G, B]
-
-
-# =======================================================
-
-
-def print_text_on_image(image, text, font_path, font_size, text_position, text_color):
-    # Open the image
-    # image = Image.open(image_path)
-
-    # Create an ImageDraw object
-    draw = ImageDraw.Draw(image)
-
-    # Specify the font and size
-    font = ImageFont.truetype("arial.ttf", size=font_size)
-    # text = 'test'
-    # Draw the text on the image
-    draw.text(text_position, text, font=font, fill=(255, 255, 255))
-
-    # Save the modified image
-    # image.save("image_with_text.jpg")
-    return image
+    image_tensor = torch.from_numpy((blended / 255.0)[None].transpose(0, 3, 1, 2).astype(np.float32))
+    return (2. * image_tensor - 1.), mask_out, [None, None, None]
 
 
 def img_uint8(image):
@@ -168,8 +192,6 @@ def latent2img(z):
     return img_uint8(latent_image)
 
 
-from datetime import datetime
-
 if __name__ == "__main__":
     data_label = {"image:"}
     parser = argparse.ArgumentParser()
@@ -183,7 +205,9 @@ if __name__ == "__main__":
                         help="do not save a grid, only individual samples. Helpful when evaluating lots of samples", )
     parser.add_argument("--skip_save", action='store_true',
                         help="do not save indiviual samples. For speed measurements.", )
+
     parser.add_argument("--ddim_steps", type=int, default=50, help="number of ddim sampling steps", )
+
     parser.add_argument("--plms", action='store_true', help="use plms sampling", )
     parser.add_argument("--fixed_code", action='store_true',
                         help="if enabled, uses the same starting code across all samples ", )
@@ -192,8 +216,10 @@ if __name__ == "__main__":
     parser.add_argument("--n_iter", type=int, default=1, help="sample this often", )
     parser.add_argument("--C", type=int, default=4, help="latent channels", )
     parser.add_argument("--f", type=int, default=8, help="downsampling factor, most often 8 or 16", )
+
     parser.add_argument("--n_samples", type=int, default=2,
                         help="how many samples to produce for each given prompt. A.k.a batch size", )
+
     parser.add_argument("--n_rows", type=int, default=0, help="rows in the grid (default: n_samples)", )
     parser.add_argument("--scale", type=float, default=5.0,
                         help="unconditional guidance scale: eps = eps(x, empty) + scale * (eps(x, cond) - eps(x, empty))", )
@@ -208,58 +234,51 @@ if __name__ == "__main__":
     parser.add_argument("--precision", type=str, help="evaluate at this precision", choices=["full", "autocast"],
                         default="autocast")
 
-    opt = parser.parse_args()
-    # seed_everything(opt.seed)
+    args = parser.parse_args()
 
-    # opt.ckpt = "models/ldm/stable-diffusion-v1/sd-v1-1.ckpt"
-    opt.ckpt = "models/ldm/stable-diffusion-v1/v1-5-pruned.ckpt"
+    args.ckpt = "models/ldm/stable-diffusion-v1/v1-5-pruned.ckpt"
 
-    config = OmegaConf.load(f"{opt.config}")
-    model = load_model_from_config(config, f"{opt.ckpt}")
+    config = OmegaConf.load(f"{args.config}")
+    model = load_model_from_config(config, f"{args.ckpt}")
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     model = model.to(device)
 
-    # =======================================================
-    # All exp files will be saved into this {exp_name} folder
-    exp_name = 'perlin_test'
+    exp_name = 'smoke_synthesis'
     num_sample = 10
     image_info = []  # all image infos will be saved to this numpy array
 
     '''
-    Here is the main setting for diffuser:
-        strength to 0.99 means fully random, 0.3-0.5 is a good range for quality
-        opt.ddim_steps is set to 10 by default for speed and quality balance
-        noise_std is the post-random noise added to the image, see paper for more details.
-
-        You can put them into the loop for experiments, see line 280-285
+    strength to 0.99 means fully random, 0.3-0.5 is a good range for quality
+    ddim_steps is set to 10 by default for speed and quality balance
+    noise_std is the post-random noise added to the image
     '''
-    opt.scale = 5
-    opt.strength = 0.5
-    opt.ddim_steps = int(10 / (opt.strength))
-    noise_std = 0
+    args.scale = 5
 
-    img_path = './ijmond_exhaust/cropped_images/'
+    args.strength = 0.4
+    args.ddim_steps = int(10 / (args.strength))
+    noise_std = 10
 
-    # mask_path = './exp/mask/'
-    mask_path = './ijmond_exhaust/cropped_mask/'
+    img_path = './ijmond_exhaust/manual_negative/'
+    mask_path = './ijmond_exhaust/cropped_images/'
+    random_mask_path = './ijmond_exhaust/vae_outputs/generated/'
     # =======================================================
 
-    opt.prompt = "Industrial toxic exhaust in snow, flame and smoke view, photo realistic, high resolution, 4k, HD"
-    opt.n_samples = 1
-    opt.n_iter = 1
-    opt.skip_grid = True
-    opt.watermark = False
-    opt.outdir = f'./outputs/{exp_name}/'
+    args.prompt = "Industrial factory with chimneys and clear blue sky, 4k, HD"
+    # A large industrial facility with smokestacks is visible under a blue sky with scattered clouds.
+    args.n_samples = 1
+    args.n_iter = 1
+    args.skip_grid = True
+    args.outdir = f'./outputs/{exp_name}/'
 
-    outpath = opt.outdir
+    outpath = args.outdir
     os.makedirs(outpath, exist_ok=True)
     mask_save_path = outpath + '/masks/'
     os.makedirs(mask_save_path, exist_ok=True)
 
     img_list = os.listdir(img_path)
-    mask_list = os.listdir(mask_path)
+    mask_list = os.listdir(random_mask_path)
 
-    precision_scope = autocast if opt.precision == "autocast" else nullcontext
+    precision_scope = autocast if args.precision == "autocast" else nullcontext
     with torch.no_grad():
         with precision_scope("cuda"):
             with model.ema_scope():
@@ -267,42 +286,29 @@ if __name__ == "__main__":
                 all_samples = list()
                 i = 0
                 while i < num_sample:
-                    try:
+                    if True:
                         i += 1
 
                         img_file = img_path + random.choice(img_list)
                         image_name = img_file.split('/')[-1].split('.')[0]
-                        mask_file = mask_path + random.choice(mask_list)
+                        mask_file = random_mask_path + random.choice(mask_list)
                         mask_name = mask_file.split('/')[-1].split('.')[0]
                         mask = Image.open(mask_file).convert("L")
                         image = Image.open(img_file).convert("RGB")
 
-                        opt.init_img = img_file
+                        args.init_img = img_file
+                        sampler = DDIMSampler(model)
 
-                        # =======================================================
-                        # # For experiments
-                        # opt.scale = random.randint(5, 15)
-                        # opt.strength = random.uniform(0.3, 0.7)
-                        # noise_std = 0 #random.uniform(0, 0.1)
-                        # opt.ddim_steps = int(10/(opt.strength))
-                        # =======================================================
-
-                        if opt.plms:
-                            raise NotImplementedError("PLMS sampler not (yet) supported")
-                            sampler = PLMSSampler(model)
-                        else:
-                            sampler = DDIMSampler(model)
-
-                        batch_size = opt.n_samples
-                        n_rows = opt.n_rows if opt.n_rows > 0 else batch_size
-                        if not opt.from_file:
-                            prompt = opt.prompt
+                        batch_size = args.n_samples
+                        n_rows = args.n_rows if args.n_rows > 0 else batch_size
+                        if not args.from_file:
+                            prompt = args.prompt
                             assert prompt is not None
                             data = [batch_size * [prompt]]
 
                         else:
-                            print(f"reading prompts from {opt.from_file}")
-                            with open(opt.from_file, "r") as f:
+                            print(f"reading prompts from {args.from_file}")
+                            with open(args.from_file, "r") as f:
                                 data = f.read().splitlines()
                                 data = list(chunk(data, batch_size))
 
@@ -311,32 +317,24 @@ if __name__ == "__main__":
                         base_count = len(os.listdir(sample_path))
                         grid_count = len(os.listdir(outpath)) - 1
 
-                        assert os.path.isfile(opt.init_img)
-                        init_image, mask_out, [R, G, B] = load_img(image, opt.init_img, mask, noise_std)
+                        assert os.path.isfile(args.init_img)
+                        init_image, mask_out, [R, G, B] = load_img(image, args.init_img, mask, noise_std)
                         init_image = init_image.to(device)
                         init_image = repeat(init_image, '1 ... -> b ...', b=batch_size)
                         init_latent = model.get_first_stage_encoding(
                             model.encode_first_stage(init_image))  # move to latent space
 
-                        # init_latent_image = latent2img(init_latent)
-                        # init_latent_image = cv2.resize(cv2.cvtColor(init_latent_image, cv2.COLOR_BGR2RGB), (512,512))
-                        # plt.imshow(init_latent_image)
-
-                        assert 0. <= opt.strength <= 1., 'can only work with strength in [0.0, 1.0]'
-                        t_enc = int(opt.strength * opt.ddim_steps)
+                        assert 0. <= args.strength <= 1., 'can only work with strength in [0.0, 1.0]'
+                        t_enc = int(args.strength * args.ddim_steps)
                         print(f"target t_enc is {t_enc} steps")
 
-                        try:
-                            sampler.make_schedule(ddim_num_steps=opt.ddim_steps, ddim_eta=opt.ddim_eta, verbose=False)
-                        except:
-                            opt.ddim_steps = 100
-                            sampler.make_schedule(ddim_num_steps=opt.ddim_steps, ddim_eta=opt.ddim_eta, verbose=False)
+                        sampler.make_schedule(ddim_num_steps=args.ddim_steps, ddim_eta=args.ddim_eta, verbose=False)
 
-                        for n in trange(opt.n_iter, desc="Sampling"):
+                        for n in trange(args.n_iter, desc="Sampling"):
 
                             for prompts in tqdm(data, desc="data"):
                                 uc = None
-                                if opt.scale != 1.0:
+                                if args.scale != 1.0:
                                     uc = model.get_learned_conditioning(batch_size * [""])
                                 if isinstance(prompts, tuple):
                                     prompts = list(prompts)
@@ -345,35 +343,23 @@ if __name__ == "__main__":
                                 # encode (scaled latent)
                                 z_enc = sampler.stochastic_encode(init_latent,
                                                                   torch.tensor([t_enc] * batch_size).to(device))
-                                # decode it
+                                # decode
                                 samples, cc, mid = sampler.decode(z_enc, c, t_enc,
-                                                                  unconditional_guidance_scale=opt.scale,
+                                                                  unconditional_guidance_scale=args.scale,
                                                                   unconditional_conditioning=uc, )
 
                                 x_samples = model.decode_first_stage(samples)
                                 x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
 
-                                if not opt.skip_save:
+                                if not args.skip_save:
                                     x_sample_i = 1
                                     for x_sample in x_samples:
                                         x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
 
                                         image = Image.fromarray(x_sample.astype(np.uint8))
                                         # image = normalize_image(image)
-                                        strength = round(opt.strength, 2)
+                                        strength = round(args.strength, 2)
                                         noise = round(noise_std, 2)
-                                        font_size = 20
-
-                                        if opt.watermark == True:
-                                            image = print_text_on_image(image,
-                                                                        f"scale={opt.scale} strength={strength} steps={opt.ddim_steps} noise={noise}",
-                                                                        "arial.ttf", font_size, (10, 10),
-                                                                        (255, 255, 255))
-                                            image = print_text_on_image(image, f"{opt.prompt}", "arial.ttf", font_size,
-                                                                        (10, 30), (255, 255, 255))
-                                            image = print_text_on_image(image, f"{img_file}", "arial.ttf", font_size,
-                                                                        (10, 50), (255, 255, 255))
-
                                         # image_save_name = f"{image_name}_{i}_{x_sample_i}{n}.jpg"
                                         image_save_name = f"{image_name}_{mask_name}_{i}_{x_sample_i}{n}.jpg"
                                         image.save(os.path.join(sample_path, image_save_name))
@@ -383,11 +369,10 @@ if __name__ == "__main__":
                                         x_sample_i += 1
                                 all_samples.append(x_samples)
 
-                        # mask_save_name = f"{image_name}_{i}_{mask_name}.png"
                         mask_save_name = f"{image_name}_{mask_name}_{i}.jpg"
                         cv2.imwrite(os.path.join(mask_save_path, mask_save_name), mask_out)
 
-                        if not opt.skip_grid:
+                        if not args.skip_grid:
                             # additionally, save as grid
                             grid = torch.stack(all_samples, 0)
                             grid = rearrange(grid, 'n b c h w -> (n b) c h w')
@@ -408,32 +393,15 @@ if __name__ == "__main__":
                                            image_save_name,
                                            mask_save_name,
                                            date_time_string,
-                                           opt.prompt,
+                                           args.prompt,
                                            noise_std,
-                                           opt.scale,
-                                           opt.strength,
-                                           opt.ddim_steps,
+                                           args.scale,
+                                           args.strength,
+                                           args.ddim_steps,
                                            R, G, B
                                            ])
 
-                    except:
-                        print('skip...')
-
-            print(f"Your samples are ready and waiting for you here: \n{outpath} \n"
-                  f" \nEnjoy.")
-
+            print(f"samples: \n{outpath} \n")
             image_info = np.array(image_info, dtype=object)
             np.save(f'{outpath}/dataset.npy', image_info)
             print("image_info has been saved as dataset.npy")
-
-
-
-
-
-
-
-
-
-
-
-

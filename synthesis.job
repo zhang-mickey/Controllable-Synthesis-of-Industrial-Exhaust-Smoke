@@ -1,0 +1,52 @@
+#!/bin/bash
+#set job requirement
+#SBATCH --partition=gpu_h100
+#SBATCH --gpus=1
+#SBATCH --cpus-per-task=4
+#SBATCH --time=06:00:00
+#SBATCH --mem=128000M
+#SBATCH --output=train-%A.out
+#SBATCH --error=train-%A.err
+
+module purge
+module load 2022
+module load Anaconda3/2022.05
+
+
+#conda remove --name supervised-learning --all
+
+#conda update -n base -c defaults conda
+
+if [ ! -d "$HOME/.conda/envs/supervised-learning" ]; then
+    conda env create -f training/environment.yml
+fi
+echo "Environment init"
+
+source activate supervised-learning
+
+
+pip install opencv-python
+pip install torchvision
+pip install pycocotools
+pip install ttach
+pip install scikit-learn
+pip install timm
+pip install einops
+pip install albumentations
+pip install numpy==1.23.1
+pip install omegaconf
+pip install safetensors
+pip install transformers tokenizers sentencepiece
+pip install pytorch-lightning
+pip install kornia
+git clone https://github.com/CompVis/taming-transformers.git
+pip install -e taming-transformers
+pip list | grep taming
+# install OpenAI CLIP
+pip install git+https://github.com/openai/CLIP.git
+echo "Running main training script..."
+
+echo "Environment activated"
+
+
+python smoke_synthesis.py
