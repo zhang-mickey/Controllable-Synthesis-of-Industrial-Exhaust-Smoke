@@ -1,0 +1,70 @@
+#!/bin/bash
+#set job requirement
+#SBATCH --partition=gpu_h100
+#SBATCH --gpus=1
+#SBATCH --cpus-per-task=4
+#SBATCH --time=06:00:00
+#SBATCH --mem=128000M
+#SBATCH --output=train-%A.out
+#SBATCH --error=train-%A.err
+
+module purge
+module load 2022
+module load Anaconda3/2022.05
+
+
+#conda remove --name supervised-learning --all
+
+#conda update -n base -c defaults conda
+
+if [ ! -d "$HOME/.conda/envs/supervised-learning" ]; then
+    conda env create -f training/environment.yml
+fi
+echo "Environment init"
+
+source activate supervised-learning
+
+
+pip install opencv-python
+pip install torchvision
+pip install pycocotools
+pip install ttach
+pip install scikit-learn
+pip install timm
+pip install einops
+pip install albumentations
+pip install numpy==1.23.1
+pip install omegaconf
+pip install diffusers[torch] accelerate
+pip install safetensors
+pip install transformers tokenizers sentencepiece
+pip install pytorch-lightning
+pip install kornia
+pip install markupsafe==2.0.1
+git clone https://github.com/CompVis/taming-transformers.git
+pip install -e taming-transformers
+pip list | grep taming
+# install OpenAI CLIP
+pip install git+https://github.com/openai/CLIP.git
+echo "Running main training script..."
+
+echo "Environment activated"
+
+
+accelerate launch train_dreambooth.py \
+  --pretrained_model_name_or_path="runwayml/stable-diffusion-v1-5" \
+  --instance_data_dir="./train_data" \
+  --output_dir="./dreambooth-smoke-model" \
+  --instance_prompt="a photo of sks smoke" \
+  --resolution=512 \
+  --train_batch_size=1 \
+  --gradient_accumulation_steps=4 \
+  --learning_rate=5e-6 \
+  --lr_scheduler="constant" \
+  --lr_warmup_steps=0 \
+  --max_train_steps=800 \
+  --mixed_precision="fp16" \
+  --use_8bit_adam \
+  --gradient_checkpointing \
+  --checkpointing_steps=200 \
+  --num_class_images=0
