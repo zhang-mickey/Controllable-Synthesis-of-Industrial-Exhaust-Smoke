@@ -1,11 +1,18 @@
+# Controllable-Synthesis-of-Industrial-Exhaust-Smoke
 
-# Text-to-Speech(TTS)
-# 1. Speaker embedding
+Go to image-to-image folder
+
+## 
+
+
+
+## Text-to-Speech(TTS)
+### 1. Speaker embedding
 
 
 
 
-# Setup
+### Setup
 
 ## Install Requirements
 
